@@ -106,8 +106,22 @@ class HelloWorld(BaseSample):
 
         #print("DOFs:", self._jetbot.dof_names)
         position, orientation = self._jetbot.get_world_pose()
-        self._jetbot.apply_action(self._my_controller.forward(start_position=position,
-                                                            start_orientation=orientation,
-                                                            goal_position=np.array([0.8, 0.8])))
+        goal = np.array([0.8, 0.8])
+        # 计算距离误差（只看 X-Y）
+        distance_to_goal = np.linalg.norm(position[:2] - goal)
+        # 误差小于一定阈值 → 停止
+        if distance_to_goal < 0.05:
+            print("[INFO] Reached goal, stopping.")
+            action = ArticulationAction(joint_velocities=[0.0, 0.0])
+        else:
+            action = self._my_controller.forward(
+                start_position=position,
+                start_orientation=orientation,
+                goal_position=goal
+            )
+            print(f"[DEBUG] Distance to goal: {distance_to_goal:.3f}, action: {action.joint_velocities}")
+
+        # 应用动作
+        self._jetbot.apply_action(action)
         return
     
