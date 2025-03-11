@@ -12,12 +12,35 @@ from isaacsim.core.utils.types import ArticulationAction
 from isaacsim.core.utils.nucleus import get_assets_root_path
 from isaacsim.core.utils.stage import add_reference_to_stage
 from isaacsim.core.api.robots import Robot
+from isaacsim.robot.wheeled_robots.robots import WheeledRobot
+from isaacsim.core.utils.types import ArticulationAction
+from isaacsim.core.api.controllers import BaseController
 import carb
 import numpy as np
 # Can be used to create a new cube or to point to an already existing cube in stage.
 from isaacsim.core.api.objects import DynamicCuboid
-# Note: checkout the required tutorials at https://docs.omniverse.nvidia.com/app_isaacsim/app_isaacsim/overview.html
+from isaacsim.robot.wheeled_robots.controllers.wheel_base_pose_controller import WheelBasePoseController
+from isaacsim.robot.wheeled_robots.controllers.differential_controller import DifferentialController
 
+# Note: checkout the required tutorials at https://docs.omniverse.nvidia.com/app_isaacsim/app_isaacsim/overview.html
+"""
+class CoolController(BaseController):
+    def __init__(self):
+        super().__init__(name="my_cool_controller")
+        # An open loop controller that uses a unicycle model
+        self._wheel_radius = 0.03
+        self._wheel_base = 0.1125
+        return
+
+    def forward(self, command):
+        # command will have two elements, first element is the forward velocity
+        # second element is the angular velocity (yaw only).
+        joint_velocities = [0.0, 0.0]
+        joint_velocities[0] = ((2 * command[0]) - (command[1] * self._wheel_base)) / (2 * self._wheel_radius)
+        joint_velocities[1] = ((2 * command[0]) + (command[1] * self._wheel_base)) / (2 * self._wheel_radius)
+        # A controller has to return an ArticulationAction
+        return ArticulationAction(joint_velocities=joint_velocities)
+"""
 
 class HelloWorld(BaseSample):
     def __init__(self) -> None:
@@ -40,18 +63,29 @@ class HelloWorld(BaseSample):
         if assets_root_path is None:
             # Use carb to log warnings, errors, and infos in your application (shown on terminal)
             carb.log_error("Could not find nucleus server with /Isaac folder")
-        asset_path = assets_root_path + "/Isaac/Robots/Jetbot/jetbot.usd"
-        add_reference_to_stage(usd_path=asset_path, prim_path="/World/Fancy_Robot")
-        jetbot_robot = world.scene.add(Robot(prim_path="/World/Fancy_Robot", name="fancy_robot"))
-        print("Num of degrees of freedom before first reset: " + str(jetbot_robot.num_dof)) # prints None
+        jetbot_asset_path = assets_root_path + "/Isaac/Robots/Jetbot/jetbot.usd"
+        world.scene.add(
+            WheeledRobot(
+                prim_path="/World/Fancy_Robot",
+                name="fancy_robot",
+                wheel_dof_names=["left_wheel_joint", "right_wheel_joint"],
+                create_robot=True,
+                usd_path=jetbot_asset_path,
+            )
+        )
         return
 
     async def setup_post_load(self):
         self._world = self.get_world()
         self._jetbot = self._world.scene.get_object("fancy_robot")
-        self._elapsed_time = 0.0
-        self._jetbot_articulation_controller = self._jetbot.get_articulation_controller()
         self._world.add_physics_callback("sending_actions", callback_fn=self.send_robot_actions)
+        # Initialize our controller after load and the first reset
+        # Initialize our controller after load and the first reset
+        self._my_controller = WheelBasePoseController(name="cool_controller",
+                                                        open_loop_wheel_controller=
+                                                            DifferentialController(name="simple_control",
+                                                                                    wheel_radius=0.03, wheel_base=0.1125),
+                                                    is_holonomic=False)
         return
 
     async def setup_pre_reset(self):
@@ -63,31 +97,17 @@ class HelloWorld(BaseSample):
     def world_cleanup(self):
         return
 
-    def send_robot_actions(self, step_size):
-            # which takes in ArticulationAction with joint_positions, joint_efforts and joint_velocities
-            # as optional args. It accepts numpy arrays of floats OR lists of floats and None
-            # 每一步都会调用，step_size 是时间间隔，通常是 1/60 秒
-        self._elapsed_time += step_size  # 累加时间
-
-        if self._elapsed_time < 2.0:
-            # 0 ~ 2 秒：后退
-            velocities = [-2.0, -2.0]
-            print("[Action] Backward")
-        elif self._elapsed_time < 4.0:
-            # 2 ~ 4 秒：右转（左轮转，右轮停）
-            velocities = [2.0, 0.0]
-            print("[Action] Turn Right")
-        elif self._elapsed_time < 5.0:
-            # 4 ~ 5 秒：继续转
-            velocities = [1.0, -1.0]
-            print("[Action] Sharp Right")
-        else:
-            # 5 秒后停止
-            velocities = [0.0, 0.0]
-            print("[Action] Stop")
-
-
-        self._jetbot_articulation_controller.apply_action(ArticulationAction(joint_positions=None,
-                                                                                joint_efforts=None,
-                                                                                joint_velocities=velocities))
+    def send_keyboard_actions(self, step_size):
         return
+    
+    def send_robot_actions(self, step_size):
+        if self._jetbot is None:
+            print("Error: jetbot is None")
+
+        #print("DOFs:", self._jetbot.dof_names)
+        position, orientation = self._jetbot.get_world_pose()
+        self._jetbot.apply_action(self._my_controller.forward(start_position=position,
+                                                            start_orientation=orientation,
+                                                            goal_position=np.array([0.8, 0.8])))
+        return
+    
