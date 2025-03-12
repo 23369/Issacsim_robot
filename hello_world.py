@@ -12,86 +12,70 @@ from isaacsim.core.utils.types import ArticulationAction
 from isaacsim.core.utils.nucleus import get_assets_root_path
 from isaacsim.core.utils.stage import add_reference_to_stage
 from isaacsim.core.api.robots import Robot
-from isaacsim.robot.wheeled_robots.robots import WheeledRobot
+from isaacsim.robot.manipulators.examples.franka import Franka
+from isaacsim.robot.manipulators.examples.franka.controllers import PickPlaceController
 from isaacsim.core.utils.types import ArticulationAction
 from isaacsim.core.api.controllers import BaseController
 import carb
 import numpy as np
 # Can be used to create a new cube or to point to an already existing cube in stage.
 from isaacsim.core.api.objects import DynamicCuboid
-from isaacsim.robot.wheeled_robots.controllers.wheel_base_pose_controller import WheelBasePoseController
-from isaacsim.robot.wheeled_robots.controllers.differential_controller import DifferentialController
+
 
 # Note: checkout the required tutorials at https://docs.omniverse.nvidia.com/app_isaacsim/app_isaacsim/overview.html
-"""
-class CoolController(BaseController):
-    def __init__(self):
-        super().__init__(name="my_cool_controller")
-        # An open loop controller that uses a unicycle model
-        self._wheel_radius = 0.03
-        self._wheel_base = 0.1125
-        return
-
-    def forward(self, command):
-        # command will have two elements, first element is the forward velocity
-        # second element is the angular velocity (yaw only).
-        joint_velocities = [0.0, 0.0]
-        joint_velocities[0] = ((2 * command[0]) - (command[1] * self._wheel_base)) / (2 * self._wheel_radius)
-        joint_velocities[1] = ((2 * command[0]) + (command[1] * self._wheel_base)) / (2 * self._wheel_radius)
-        # A controller has to return an ArticulationAction
-        return ArticulationAction(joint_velocities=joint_velocities)
-"""
 
 class HelloWorld(BaseSample):
     def __init__(self) -> None:
         super().__init__()
+        self._step_counter = 0  # 新增：用于计数 step
         return
 
     def setup_scene(self):
         world = self.get_world()
         world.scene.add_default_ground_plane()
+        franka = world.scene.add(Franka(prim_path="/World/Fancy_Franka", name="fancy_franka"))
         fancy_cube = world.scene.add(
             DynamicCuboid(
-                prim_path="/World/random_cube", # The prim path of the cube in the USD stage
-                name="fancy_cube", # The unique name used to retrieve the object from the scene later on
-                position=np.array([1.5, 0, 1.0]), # Using the current stage units which is in meters by default.
-                scale=np.array([0.5015, 0.5015, 0.5015]), # most arguments accept mainly numpy arrays.
-                color=np.array([0, 0, 1.0]), # RGB channels, going from 0-1
-            ))
-
-        assets_root_path = get_assets_root_path()
-        if assets_root_path is None:
-            # Use carb to log warnings, errors, and infos in your application (shown on terminal)
-            carb.log_error("Could not find nucleus server with /Isaac folder")
-        jetbot_asset_path = assets_root_path + "/Isaac/Robots/Jetbot/jetbot.usd"
-        world.scene.add(
-            WheeledRobot(
-                prim_path="/World/Fancy_Robot",
-                name="fancy_robot",
-                wheel_dof_names=["left_wheel_joint", "right_wheel_joint"],
-                create_robot=True,
-                usd_path=jetbot_asset_path,
+                prim_path="/World/random_cube",
+                name="fancy_cube",
+                position=np.array([0.3, 0.3, 0.3]),
+                scale=np.array([0.0515, 0.0515, 0.0515]),
+                color=np.array([0, 0, 1.0]),
             )
         )
+
+        
         return
 
     async def setup_post_load(self):
         self._world = self.get_world()
-        self._jetbot = self._world.scene.get_object("fancy_robot")
-        self._world.add_physics_callback("sending_actions", callback_fn=self.send_robot_actions)
-        # Initialize our controller after load and the first reset
-        # Initialize our controller after load and the first reset
-        self._my_controller = WheelBasePoseController(name="cool_controller",
-                                                        open_loop_wheel_controller=
-                                                            DifferentialController(name="simple_control",
-                                                                                    wheel_radius=0.03, wheel_base=0.1125),
-                                                    is_holonomic=False)
+        self._franka = self._world.scene.get_object("fancy_franka")
+        self._fancy_cube = self._world.scene.get_object("fancy_cube")
+        # Initialize a pick and place controller
+        self._controller = PickPlaceController(
+            name="pick_place_controller",
+            gripper=self._franka.gripper,
+            robot_articulation=self._franka,
+        )
+        self._world.add_physics_callback("sim_step", callback_fn=self.physics_step)
+        # World has pause, stop, play..etc
+        # Note: if async version exists, use it in any async function is this workflow
+        self._franka.gripper.set_joint_positions(self._franka.gripper.joint_opened_positions)
+        #await self._world.play_async()    # 这个相当于play simulation
+        # 获取当前夹爪关节值
+        gripper_positions = self._franka.gripper.get_joint_positions()
+        # 估算夹爪的开口宽度（两边夹指的总距离）
+        gripper_opening = sum(gripper_positions)
+        print(f"🔧 当前夹爪开口宽度估计为：{gripper_opening:.4f} 米 单个的{gripper_positions}")
         return
 
     async def setup_pre_reset(self):
         return
 
     async def setup_post_reset(self):
+        self._controller.reset()
+        self._franka.gripper.set_joint_positions(self._franka.gripper.joint_opened_positions)
+        await self._world.play_async()
         return
 
     def world_cleanup(self):
@@ -100,28 +84,26 @@ class HelloWorld(BaseSample):
     def send_keyboard_actions(self, step_size):
         return
     
-    def send_robot_actions(self, step_size):
-        if self._jetbot is None:
-            print("Error: jetbot is None")
-
-        #print("DOFs:", self._jetbot.dof_names)
-        position, orientation = self._jetbot.get_world_pose()
-        goal = np.array([0.8, 0.8])
-        # 计算距离误差（只看 X-Y）
-        distance_to_goal = np.linalg.norm(position[:2] - goal)
-        # 误差小于一定阈值 → 停止
-        if distance_to_goal < 0.05:
-            print("[INFO] Reached goal, stopping.")
-            action = ArticulationAction(joint_velocities=[0.0, 0.0])
-        else:
-            action = self._my_controller.forward(
-                start_position=position,
-                start_orientation=orientation,
-                goal_position=goal
-            )
-            print(f"[DEBUG] Distance to goal: {distance_to_goal:.3f}, action: {action.joint_velocities}")
-
-        # 应用动作
-        self._jetbot.apply_action(action)
-        return
+    def physics_step(self, step_size):
+        # Step 计数器 +1
+        self._step_counter += 1
+        cube_position, _ = self._fancy_cube.get_world_pose()
+        goal_position = np.array([-0.3, -0.3, 0.0515 / 2.0])
+        current_joint_positions = self._franka.get_joint_positions()
+        actions = self._controller.forward(
+            picking_position=cube_position,
+            placing_position=goal_position,
+            current_joint_positions=current_joint_positions,
+        )
+        self._franka.apply_action(actions)
+         # 每 5 步打印一次夹爪 position
+        if self._step_counter % 5 == 0:
+            gripper_pos = self._franka.gripper.get_joint_positions()
+            print(f"[Step {self._step_counter}] 🤖 当前夹爪位置：{gripper_pos}，总开口：{sum(gripper_pos):.4f} 米")
+        # Only for the pick and place controller, indicating if the state
+        # machine reached the final state.
+        if self._controller.is_done():  
+            self._world.pause()   # 这个相当于pause simulation
+        return 
+    
     
