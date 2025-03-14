@@ -9,130 +9,79 @@
 
 from isaacsim.examples.interactive.base_sample import BaseSample
 from isaacsim.robot.manipulators.examples.franka import Franka
-from isaacsim.robot.manipulators.examples.franka.controllers import PickPlaceController
-from isaacsim.core.api.tasks import BaseTask
-import numpy as np
+from omni.isaac.core.utils.types import ArticulationAction
 from isaacsim.core.api.objects import DynamicCuboid
+import numpy as np
+import asyncio
+from isaacsim.examples.interactive.hello_world.python_receiver import UnityUDPReceiver
 
-
-# Note: checkout the required tutorials at https://docs.omniverse.nvidia.com/app_isaacsim/app_isaacsim/overview.html
-
-class FrankaPlaying(BaseTask):
-    def __init__(self, name):
-        super().__init__(name=name, offset=None)
-        self._goal_position = np.array([-0.3, -0.3, 0.0515 / 2.0])
-        self._task_achieved = False
-        return
-    
-    def set_up_scene(self, scene):
-        super().set_up_scene(scene)
-        scene.add_default_ground_plane()
-        self._cube = scene.add(DynamicCuboid(
-                    prim_path="/World/random_cube",
-                    name="fancy_cube",
-                    position=np.array([0.3, 0.3, 0.3]),
-                    scale=np.array([0.0515, 0.0515, 0.0515]),
-                    color=np.array([0, 0, 1.0]),
-                ))
-        self._franka = scene.add(Franka(prim_path="/World/Fancy_Franka",
-                                         name="fancy_franka"))
-        return
-    
-    def get_observations(self):
-        cube_position, _ = self._cube.get_world_pose()
-        current_joint_positions = self._franka.get_joint_positions()
-        observations = {
-            self._franka.name: {
-                "joint_positions": current_joint_positions,
-            },
-            self._cube.name: {
-                "position": cube_position,
-                "goal_position": self._goal_position
-            }
-        }
-        return observations
-    
-    def pre_step(self, control_index, simulation_time):
-        cube_position, _ = self._cube.get_world_pose()
-        if not self._task_achieved and np.mean(np.abs(self._goal_position - cube_position)) < 0.02:
-            # Visual Materials are applied by default to the cube
-            # in this case the cube has a visual material of type
-            # PreviewSurface, we can set its color once the target is reached.
-            self._cube.get_applied_visual_material().set_color(color=np.array([0, 1.0, 0]))
-            self._task_achieved = True
-        return
-    
-    def post_reset(self):
-        self._franka.gripper.set_joint_positions(self._franka.gripper.joint_opened_positions)
-        self._cube.get_applied_visual_material().set_color(color=np.array([0, 0, 1.0]))
-        self._task_achieved = False
-        return
 
 class HelloWorld(BaseSample):
     def __init__(self) -> None:
         super().__init__()
-        self._step_counter = 0  # 新增：用于计数 step
-        return
+        self.receiver = UnityUDPReceiver()
+        self.goal_position = np.array([0.3, 0.0, 0.3])  # 初始化安全位置
+        self.goal_rotation = np.array([0.0, 0.0, 0.0, 1.0])
+        self.finger_distance = 0.13  # 初始不夹取状态
+        self.sim_running = False
+        self.receiver_task = None
 
     def setup_scene(self):
         world = self.get_world()
-        world.add_task(FrankaPlaying(name="franka_playing"))
-        return
+        world.scene.add_default_ground_plane()
+        world.scene.add(Franka(prim_path="/World/Fancy_Franka", name="fancy_franka"))
+        world.scene.add(
+            DynamicCuboid(
+                prim_path="/World/random_cube",
+                name="fancy_cube",
+                position=np.array([0.3, 0.3, 0.3]),
+                scale=np.array([0.0515, 0.0515, 0.0515]),
+                color=np.array([0, 0, 1.0]),
+            )
+        )
 
     async def setup_post_load(self):
         self._world = self.get_world()
         self._franka = self._world.scene.get_object("fancy_franka")
-        # Initialize a pick and place controller
-        self._controller = PickPlaceController(
-            name="pick_place_controller",
-            gripper=self._franka.gripper,
-            robot_articulation=self._franka,
-        )
+        self._fancy_cube = self._world.scene.get_object("fancy_cube")
         self._world.add_physics_callback("sim_step", callback_fn=self.physics_step)
-        # World has pause, stop, play..etc
-        # Note: if async version exists, use it in any async function is this workflow
         self._franka.gripper.set_joint_positions(self._franka.gripper.joint_opened_positions)
-        await self._world.play_async()    # 这个相当于play simulation
-        # 获取当前夹爪关节值
-        gripper_positions = self._franka.gripper.get_joint_positions()
-        # 估算夹爪的开口宽度（两边夹指的总距离）
-        gripper_opening = sum(gripper_positions)
-        print(f"🔧 当前夹爪开口宽度估计为：{gripper_opening:.4f} 米 单个的{gripper_positions}")
-        return
-
-    async def setup_pre_reset(self):
-        return
+        # 不自动启动仿真与接收线程，等用户点击 Play 再进入 setup_post_reset
 
     async def setup_post_reset(self):
-        self._controller.reset()
-        self._franka.gripper.set_joint_positions(self._franka.gripper.joint_opened_positions)
+        if not self.sim_running:
+            self.sim_running = True
+            asyncio.get_event_loop().run_in_executor(None, self.update_goal_pose)
         await self._world.play_async()
-        return
 
-    def world_cleanup(self):
-        return
+    def update_goal_pose(self):
+        while self.sim_running:
+            hand_position, hand_rotation, finger_distance = self.receiver.receive_from_unity()
+            self.goal_position, self.goal_rotation = self.receiver.unity_to_isaac_transform(hand_position, hand_rotation)
+            self.finger_distance = finger_distance
 
-    def send_keyboard_actions(self, step_size):
-        return
-    
     def physics_step(self, step_size):
-        # Step 计数器 +1
-        self._step_counter += 1
-        current_observations = self._world.get_observations()
-        actions = self._controller.forward(
-            picking_position=current_observations["fancy_cube"]["position"],
-            placing_position=current_observations["fancy_cube"]["goal_position"],
-            current_joint_positions=current_observations["fancy_franka"]["joint_positions"],
+        if not self.sim_running:
+            return
+
+        # 使用逆运动学解算
+        target_joint_positions = self._franka.compute_inverse_kinematics(
+            target_position=self.goal_position,
+            target_orientation=self.goal_rotation
         )
+
+        # 根据手指距离判断夹取状态
+        if self.finger_distance <= 0.04:
+            gripper_joint_positions = self._franka.gripper.joint_closed_positions  # 夹取
+        else:
+            gripper_joint_positions = self._franka.gripper.joint_opened_positions  # 不夹取
+
+        # 应用动作
+        actions = ArticulationAction(
+            joint_positions=np.concatenate((target_joint_positions, gripper_joint_positions))
+        )
+
         self._franka.apply_action(actions)
-         # 每 5 步打印一次夹爪 position
-        if self._step_counter % 5 == 0:
-            gripper_pos = self._franka.gripper.get_joint_positions()
-            print(f"[Step {self._step_counter}] 🤖 当前夹爪位置：{gripper_pos}，总开口：{sum(gripper_pos):.4f} 米")
-        # Only for the pick and place controller, indicating if the state
-        # machine reached the final state.
-        if self._controller.is_done():  
-            self._world.pause()   # 这个相当于pause simulation
-        return 
-    
-    
+
+    async def cleanup(self):
+        self.sim_running = False
